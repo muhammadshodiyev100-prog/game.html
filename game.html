@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Telegram Mini Game — Catch The Coins</title>
+  <style>
+    :root {
+      --bg: #0f1220;
+      --panel: #171a2b;
+      --text: #e6e6f0;
+      --muted: #9aa0b4;
+      --accent: #4ade80; /* just for CSS accent; canvas colors are set in JS */
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: radial-gradient(1000px 600px at 50% -200px, #1b2040 0%, var(--bg) 60%);
+      color: var(--text);
+      font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      display: grid;
+      place-items: center;
+      padding: 12px;
+    }
+    .card {
+      width: 100%;
+      max-width: 520px;
+      background: var(--panel);
+      border-radius: 18px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.06);
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 14px; gap: 12px; border-bottom: 1px solid rgba(255,255,255,.06);
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+    header .muted { color: var(--muted); font-size: 12px; }
+    #gameWrap { position: relative; aspect-ratio: 3/5; background: #0b0e1a; }
+    canvas { width: 100%; height: 100%; display: block; }
+
+    .overlay {
+      position: absolute; inset: 0; display: grid; place-items: center;
+      background: linear-gradient(180deg, rgba(15,18,32,.92), rgba(15,18,32,.88));
+      backdrop-filter: blur(2px);
+      text-align: center; padding: 16px;
+    }
+    .overlay h2 { margin: 6px 0 0; font-size: 22px; }
+    .overlay p { margin: 8px 0 16px; color: var(--muted); }
+    .btn {
+      appearance: none; border: 0; border-radius: 999px; padding: 12px 18px;
+      background: linear-gradient(180deg, #48d886, #26a85e);
+      color: white; font-weight: 700; font-size: 16px; cursor: pointer;
+      box-shadow: 0 8px 16px rgba(37,165,95,.35);
+    }
+    .row { display:flex; align-items:center; justify-content:center; gap:10px; }
+    .tiny { font-size:12px; color:var(--muted); margin-top:8px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <header>
+      <div>
+        <h1>Catch The Coins</h1>
+        <div class="muted">Simple HTML5 canvas game — mobile friendly</div>
+      </div>
+      <div class="muted" id="best">Best: 0</div>
+    </header>
+
+    <div id="gameWrap">
+      <canvas id="game" width="360" height="600" aria-label="Game canvas"></canvas>
+      <div class="overlay" id="overlay">
+        <div>
+          <h2>Tap to Move. Catch the Coins!</h2>
+          <p>Drag or tap left/right to move the paddle. 30 seconds. Miss 3 coins and it's over.</p>
+          <div class="row">
+            <button class="btn" id="playBtn">Start Game</button>
+          </div>
+          <div class="tiny">Works standalone or inside Telegram Game Platform.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('overlay');
+  const playBtn = document.getElementById('playBtn');
+  const bestEl = document.getElementById('best');
+
+  // HiDPI scaling
+  function fitCanvas() {
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const style = getComputedStyle(canvas);
+    const cssW = parseFloat(style.width);
+    const cssH = parseFloat(style.height);
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  new ResizeObserver(fitCanvas).observe(canvas);
+  fitCanvas();
+
+  // Game state
+  let running = false;
+  let score = 0; let misses = 0; let best = Number(localStorage.getItem('bestScore')||0);
+  let paddle = { x: 160, y: 560, w: 80, h: 14, speed: 7 };
+  let coins = []; let t = 0; let timeLeft = 30_000; // ms
+  bestEl.textContent = `Best: ${best}`;
+
+  // Input
+  let pointerX = paddle.x;
+  function toCanvasX(clientX) {
+    const rect = canvas.getBoundingClientRect();
+    return Math.max(0, Math.min(rect.width, clientX - rect.left));
+  }
+  canvas.addEventListener('pointerdown', e => { pointerX = toCanvasX(e.clientX); e.target.setPointerCapture(e.pointerId); });
+  canvas.addEventListener('pointermove', e => { if (e.pressure || e.buttons) pointerX = toCanvasX(e.clientX); });
+  canvas.addEventListener('pointerup',   e => { pointerX = toCanvasX(e.clientX); });
+
+  // Helpers
+  function rand(a,b){ return Math.random()*(b-a)+a; }
+  function spawnCoin(){
+    coins.push({ x: rand(12, 348), y: -20, r: 10, vy: rand(2.2, 4.5), rot: 0 });
+  }
+
+  function start(){
+    running = true; score = 0; misses = 0; coins = []; t = 0; timeLeft = 30_000; last = performance.now();
+    overlay.style.display = 'none';
+    spawnCoin();
+    loop();
+  }
+
+  function gameOver(){
+    running = false;
+    overlay.style.display = 'grid';
+    overlay.innerHTML = `<div><h2>Game Over</h2><p>Score: <b>${score}</b> · Misses: ${misses}</p><div class="row"><button class="btn" id="again">Play Again</button></div><div class="tiny">Your best: ${best}</div></div>`;
+    document.getElementById('again').addEventListener('click', start);
+
+    // Save and optionally notify Telegram container
+    if (score > best) { best = score; localStorage.setItem('bestScore', String(best)); bestEl.textContent = `Best: ${best}`; }
+    try {
+      if (window.TelegramGameProxy && typeof window.TelegramGameProxy.shareScore === 'function') {
+        // Old Telegram Games API: ask container to open share dialog with score
+        window.TelegramGameProxy.shareScore(score);
+      } else if (window.parent && window.parent !== window) {
+        // Generic postMessage so your bot/webview can listen and send setGameScore via Bot API
+        window.parent.postMessage({ __tg_game_score: score }, '*');
+      }
+    } catch(e) { /* no-op */ }
+  }
+
+  let last = 0;
+  function loop(now){
+    if (!running) return;
+    requestAnimationFrame(loop);
+    const dt = Math.min(50, (now - last) || 16);
+    last = now;
+    timeLeft -= dt;
+    t += dt;
+
+    // Difficulty scaling & spawns
+    if (t > 500) { t = 0; spawnCoin(); }
+
+    // Move paddle toward input
+    const target = Math.max(paddle.w/2, Math.min(360 - paddle.w/2, pointerX));
+    const dx = target - (paddle.x + paddle.w/2);
+    paddle.x += Math.sign(dx) * Math.min(Math.abs(dx), paddle.speed * (dt/16));
+
+    // Update coins
+    for (let i = coins.length - 1; i >= 0; i--) {
+      const c = coins[i];
+      c.y += c.vy * (dt/16);
+      c.rot += 0.1 * (dt/16);
+      // catch?
+      if (c.y + c.r >= paddle.y && c.y - c.r <= paddle.y + paddle.h) {
+        if (c.x >= paddle.x && c.x <= paddle.x + paddle.w) {
+          score++; coins.splice(i,1); continue;
+        }
+      }
+      // miss?
+      if (c.y - c.r > 600) { misses++; coins.splice(i,1); }
+    }
+
+    if (misses >= 3 || timeLeft <= 0) return gameOver();
+
+    // Draw
+    const w = 360, h = 600;
+    ctx.clearRect(0,0,w,h);
+
+    // background grid
+    ctx.globalAlpha = 0.4;
+    for (let y = 0; y < h; y += 40) {
+      ctx.fillStyle = '#0f1326'; ctx.fillRect(0,y, w, 1);
+    }
+    ctx.globalAlpha = 1;
+
+    // paddle
+    ctx.fillStyle = '#4ade80';
+    roundRect(ctx, paddle.x, paddle.y, paddle.w, paddle.h, 7); ctx.fill();
+
+    // coins
+    for (const c of coins) {
+      drawCoin(ctx, c.x, c.y, c.r, c.rot);
+    }
+
+    // HUD
+    ctx.fillStyle = '#e6e6f0';
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.textAlign = 'left'; ctx.fillText(`Score: ${score}`, 10, 24);
+    ctx.textAlign = 'right'; ctx.fillText(`Time: ${(timeLeft/1000|0)}s`, w-10, 24);
+    ctx.textAlign = 'center'; ctx.fillStyle = '#9aa0b4'; ctx.fillText(`Misses: ${misses}/3`, w/2, 24);
+  }
+
+  // Drawing helpers
+  function roundRect(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+  function drawCoin(ctx, x, y, r, rot){
+    ctx.save(); ctx.translate(x,y); ctx.rotate(rot);
+    // coin body
+    const grd = ctx.createRadialGradient(0,0, r*0.2, 0,0, r);
+    grd.addColorStop(0,'#ffe082'); grd.addColorStop(1,'#f1b300');
+    ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fill();
+    // inner mark
+    ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(0,0,0,.2)'; ctx.beginPath(); ctx.arc(0,0,r*0.65,0,Math.PI*2); ctx.stroke();
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.font = 'bold 12px system-ui, sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('$',0,1);
+    ctx.restore();
+  }
+
+  // UI wiring
+  playBtn.addEventListener('click', start);
+
+  // Start automatically inside Telegram webview if desired
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !running && overlay.style.display !== 'none') { /* stay idle */ } });
+})();
+</script>
+
+<!--
+==================== HOW TO USE WITH TELEGRAM (quick) ====================
+1) Host this single HTML file on HTTPS (any static hosting: GitHub Pages, Netlify, Vercel, your VPS, etc.).
+2) In @BotFather: /newgame  → enter Name and a unique Short Name (e.g., coin_catcher).
+3) In your bot code, call sendGame with the short_name. Example (Python aiogram):
+
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils import executor
+bot = Bot("<BOT_TOKEN>")
+dp = Dispatcher(bot)
+
+@dp.message_handler(commands=['start'])
+async def start(m: types.Message):
+    await m.answer_game('coin_catcher')
+
+@dp.callback_query_handler(lambda c: c.game_short_name == 'coin_catcher')
+async def open_game(c: types.CallbackQuery):
+    await bot.answer_callback_query(c.id, url='https://YOUR-DOMAIN/path/game.html')
+
+executor.start_polling(dp)
+
+4) Optional: When the game ends, we postMessage the score to parent. Make your web page or bot
+   listen in the WebView and call setGameScore via Bot API.
+   (In this file, see window.parent.postMessage({ __tg_game_score: score }, '*')).
+==========================================================================
+-->
+</body>
+</html>
